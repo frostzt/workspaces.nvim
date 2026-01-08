@@ -149,8 +149,51 @@ function M.workspace_picker(opts)
     :find()
 end
 
+---Get project-scoped workspaces (current + related)
+---Get project-scoped workspaces (session + current + related)
+---@return Workspace[]
+local function get_project_workspaces()
+  local persistence = require('workspaces.persistence')
+  local workspaces = {}
+  local seen = {}
+
+  -- 1. Add ALL session workspaces first
+  for _, ws in ipairs(state.get_session()) do
+    if not seen[ws.path] then
+      table.insert(workspaces, ws)
+      seen[ws.path] = true
+    end
+  end
+
+  -- 2. Get current workspace
+  local active = state.get_active()
+  local cwd = vim.fn.getcwd()
+  local current_ws = active or state.find_by_path(cwd)
+
+  if current_ws then
+    if not seen[current_ws.path] then
+      table.insert(workspaces, current_ws)
+      seen[current_ws.path] = true
+    end
+
+    -- 3. Add related workspaces
+    local related_paths = persistence.get_related_workspaces(current_ws.path)
+    for _, rel_path in ipairs(related_paths) do
+      if not seen[rel_path] then
+        local ws = state.find_by_path(rel_path)
+        if ws then
+          table.insert(workspaces, ws)
+          seen[rel_path] = true
+        end
+      end
+    end
+  end
+
+  return workspaces
+end
+
 ---Find files across workspace(s)
----@param workspace_path? string Specific workspace path or nil for all session workspaces
+---@param workspace_path? string Specific workspace path or nil for project workspaces
 ---@param opts? table
 function M.find_files(workspace_path, opts)
   if not has_telescope then
@@ -171,15 +214,20 @@ function M.find_files(workspace_path, opts)
       return
     end
   else
-    local session = state.get_session()
-    if #session == 0 then
-      utils.notify('No workspaces in session. Use :WorkspaceOpen to add one.')
+    -- Use project-scoped workspaces (current + related)
+    local workspaces = get_project_workspaces()
+    if #workspaces == 0 then
+      utils.notify('No workspace for current directory. Use :WorkspaceAdd first.')
       return
     end
     search_dirs = vim.tbl_map(function(ws)
       return ws.path
-    end, session)
-    opts.prompt_title = 'Files in Workspaces (' .. #session .. ')'
+    end, workspaces)
+    if #workspaces == 1 then
+      opts.prompt_title = 'Files in ' .. workspaces[1].name
+    else
+      opts.prompt_title = 'Files in Project (' .. #workspaces .. ' workspaces)'
+    end
   end
 
   -- Use telescope builtin with search_dirs
@@ -210,15 +258,20 @@ function M.live_grep(workspace_path, opts)
       return
     end
   else
-    local session = state.get_session()
-    if #session == 0 then
-      utils.notify('No workspaces in session')
+    -- Use project-scoped workspaces (current + related)
+    local workspaces = get_project_workspaces()
+    if #workspaces == 0 then
+      utils.notify('No workspace for current directory. Use :WorkspaceAdd first.')
       return
     end
     search_dirs = vim.tbl_map(function(ws)
       return ws.path
-    end, session)
-    opts.prompt_title = 'Grep in Workspaces (' .. #session .. ')'
+    end, workspaces)
+    if #workspaces == 1 then
+      opts.prompt_title = 'Grep in ' .. workspaces[1].name
+    else
+      opts.prompt_title = 'Grep in Project (' .. #workspaces .. ' workspaces)'
+    end
   end
 
   require('telescope.builtin').live_grep(vim.tbl_extend('force', opts, {

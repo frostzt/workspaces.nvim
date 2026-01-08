@@ -293,11 +293,9 @@ function M.cmd_select()
   M.pick_workspace('Select workspace', function(workspace)
     state.open(workspace.path)
     utils.notify('Switched to: ' .. workspace.name .. ' (' .. workspace.path .. ')')
-    -- Refresh neo-tree to show new directory
+    -- Update neo-tree root without closing (preserves expanded dirs)
     vim.defer_fn(function()
-      -- Close and reopen neo-tree to refresh with new cwd
-      pcall(vim.cmd, 'Neotree close')
-      pcall(vim.cmd, 'Neotree reveal')
+      pcall(vim.cmd, 'Neotree dir=' .. vim.fn.fnameescape(workspace.path))
     end, 100)
   end)
 end
@@ -342,10 +340,9 @@ function M.cmd_switch(identifier)
     M.pick_session_workspace('Switch to workspace', function(workspace)
       state.set_active(workspace)
       utils.notify('Switched to: ' .. workspace.name .. ' (' .. workspace.path .. ')')
-      -- Refresh neo-tree
+      -- Update neo-tree root without closing
       vim.defer_fn(function()
-        pcall(vim.cmd, 'Neotree close')
-        pcall(vim.cmd, 'Neotree reveal')
+        pcall(vim.cmd, 'Neotree dir=' .. vim.fn.fnameescape(workspace.path))
       end, 100)
     end)
     return
@@ -356,10 +353,9 @@ function M.cmd_switch(identifier)
     -- Ensure it's in session
     state.open(workspace.path)
     utils.notify('Switched to: ' .. workspace.name .. ' (' .. workspace.path .. ')')
-    -- Refresh neo-tree
+    -- Update neo-tree root without closing
     vim.defer_fn(function()
-      pcall(vim.cmd, 'Neotree close')
-      pcall(vim.cmd, 'Neotree reveal')
+      pcall(vim.cmd, 'Neotree dir=' .. vim.fn.fnameescape(workspace.path))
     end, 100)
   else
     utils.notify('Workspace not found', vim.log.levels.ERROR)
@@ -399,10 +395,90 @@ function M.cmd_terminal(workspace_path)
   end
 end
 
----Generic workspace picker using vim.ui.select
+---Get project-scoped workspaces (current + related)
+---Get project-scoped workspaces (session + current + related)
+---@return Workspace[]
+local function get_project_workspaces()
+  local persistence = require('workspaces.persistence')
+  local workspaces = {}
+  local seen = {}
+
+  -- 1. First, add ALL session workspaces (ones you've opened in this nvim instance)
+  --    This ensures you can always switch back to any workspace you've visited
+  for _, ws in ipairs(state.get_session()) do
+    if not seen[ws.path] then
+      table.insert(workspaces, ws)
+      seen[ws.path] = true
+    end
+  end
+
+  -- 2. Get current workspace (from active or cwd)
+  local active = state.get_active()
+  local cwd = vim.fn.getcwd()
+  local current_ws = active or state.find_by_path(cwd)
+
+  if current_ws then
+    -- Add current if not already added
+    if not seen[current_ws.path] then
+      table.insert(workspaces, current_ws)
+      seen[current_ws.path] = true
+    end
+
+    -- 3. Add related workspaces from .nvim-workspace.json
+    local related_paths = persistence.get_related_workspaces(current_ws.path)
+    for _, rel_path in ipairs(related_paths) do
+      if not seen[rel_path] then
+        local ws = state.find_by_path(rel_path)
+        if ws then
+          table.insert(workspaces, ws)
+          seen[rel_path] = true
+        else
+          local new_ws, _ = state.add(rel_path)
+          if new_ws then
+            table.insert(workspaces, new_ws)
+            seen[rel_path] = true
+          end
+        end
+      end
+    end
+  end
+
+  return workspaces
+end
+
+---Project workspace picker (current + related) - DEFAULT
 ---@param title string
 ---@param callback fun(workspace: Workspace)
-function M.pick_workspace(title, callback)
+function M.pick_project_workspace(title, callback)
+  local workspaces = get_project_workspaces()
+
+  if #workspaces == 0 then
+    utils.notify('No workspace for current directory. Use :WorkspaceAdd first.')
+    return
+  end
+
+  if #workspaces == 1 then
+    utils.notify('Only one workspace. Use :WorkspaceRelated add <path> to add related workspaces.')
+  end
+
+  vim.ui.select(workspaces, {
+    prompt = title,
+    format_item = function(ws)
+      local active = state.get_active()
+      local prefix = (active and active.path == ws.path) and utils.icon('active') or utils.icon('workspace')
+      return string.format('%s %s  %s', prefix, ws.name, utils.truncate_path(ws.path, 40))
+    end,
+  }, function(choice)
+    if choice then
+      callback(choice)
+    end
+  end)
+end
+
+---All workspaces picker (global registry)
+---@param title string
+---@param callback fun(workspace: Workspace)
+function M.pick_all_workspaces(title, callback)
   local workspaces = state.get_all_sorted()
 
   if #workspaces == 0 then
@@ -420,6 +496,13 @@ function M.pick_workspace(title, callback)
       callback(choice)
     end
   end)
+end
+
+---Generic workspace picker - now defaults to project scope
+---@param title string
+---@param callback fun(workspace: Workspace)
+function M.pick_workspace(title, callback)
+  M.pick_project_workspace(title, callback)
 end
 
 ---Session workspace picker

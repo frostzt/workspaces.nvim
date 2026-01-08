@@ -4,6 +4,7 @@ local M = {}
 
 local state = require('workspaces.state')
 local utils = require('workspaces.utils')
+local persistence = require('workspaces.persistence')
 
 ---@class PickerState
 ---@field buf integer?
@@ -21,8 +22,69 @@ local picker_state = {
   on_select = nil,
 }
 
+---Get project-scoped workspaces (session + current + related)
+---@return Workspace[]
+local function get_project_workspaces()
+  local workspaces = {}
+  local seen = {}
+
+  -- 1. First, add ALL session workspaces (ones you've opened in this nvim instance)
+  --    This ensures you can always switch back to any workspace you've visited
+  for _, ws in ipairs(state.get_session()) do
+    if not seen[ws.path] then
+      table.insert(workspaces, ws)
+      seen[ws.path] = true
+    end
+  end
+
+  -- 2. Get current workspace (from active or cwd)
+  local active = state.get_active()
+  local cwd = vim.fn.getcwd()
+  local current_ws = active or state.find_by_path(cwd)
+
+  if current_ws then
+    -- Add current if not already added
+    if not seen[current_ws.path] then
+      table.insert(workspaces, current_ws)
+      seen[current_ws.path] = true
+    end
+
+    -- 3. Add related workspaces from .nvim-workspace.json
+    local related_paths = persistence.get_related_workspaces(current_ws.path)
+    for _, rel_path in ipairs(related_paths) do
+      if not seen[rel_path] then
+        local ws = state.find_by_path(rel_path)
+        if ws then
+          table.insert(workspaces, ws)
+          seen[rel_path] = true
+        else
+          -- Workspace exists in related but not in registry - add it
+          local new_ws, _ = state.add(rel_path)
+          if new_ws then
+            table.insert(workspaces, new_ws)
+            seen[rel_path] = true
+          end
+        end
+      end
+    end
+  end
+
+  -- 4. If still no workspaces, check if cwd itself could be a workspace
+  if #workspaces == 0 then
+    local root = utils.find_root(cwd, require('workspaces.config').get().root_patterns)
+    if root then
+      local ws = state.find_by_path(root)
+      if ws then
+        table.insert(workspaces, ws)
+      end
+    end
+  end
+
+  return workspaces
+end
+
 ---Show the workspace picker
----@param opts? {title?: string, on_select?: function, show_all?: boolean}
+---@param opts? {title?: string, on_select?: function, show_all?: boolean, show_related?: boolean}
 function M.show(opts)
   opts = opts or {}
 
@@ -31,10 +93,36 @@ function M.show(opts)
     return
   end
 
-  -- Get workspaces
-  local workspaces = opts.show_all and state.get_all_sorted() or state.get_session()
+  -- Get workspaces based on mode
+  local workspaces
+  local title
+
+  if opts.show_all then
+    -- Show ALL workspaces from global registry
+    workspaces = state.get_all_sorted()
+    title = opts.title or 'All Workspaces'
+  elseif opts.show_related ~= false then
+    -- Default: Show current project + related workspaces
+    workspaces = get_project_workspaces()
+    title = opts.title or 'Project Workspaces'
+
+    -- If no related workspaces, show helpful message
+    if #workspaces == 0 then
+      utils.notify('No workspace found for current directory.')
+      utils.notify('Use :WorkspaceAdd to add current directory, or :WorkspacePicker all to see all workspaces.')
+      return
+    elseif #workspaces == 1 then
+      -- Only current workspace, hint about adding related
+      utils.notify('Tip: Use :WorkspaceRelated add <path> to add related workspaces')
+    end
+  else
+    -- Session workspaces only
+    workspaces = state.get_session()
+    title = opts.title or 'Session Workspaces'
+  end
+
   if #workspaces == 0 then
-    utils.notify('No workspaces available')
+    utils.notify('No workspaces available. Use :WorkspacePicker all to see all workspaces.')
     return
   end
 
@@ -53,7 +141,7 @@ function M.show(opts)
     end
   end
 
-  M.create_window(opts.title or 'Workspaces')
+  M.create_window(title)
   M.render()
   M.setup_keymaps()
 end
@@ -245,10 +333,9 @@ function M.select()
   else
     state.open(ws.path)
     utils.notify('Switched to: ' .. ws.name .. ' (' .. ws.path .. ')')
-    -- Refresh neo-tree
+    -- Update neo-tree root without closing (preserves expanded dirs)
     vim.defer_fn(function()
-      pcall(vim.cmd, 'Neotree close')
-      pcall(vim.cmd, 'Neotree reveal')
+      pcall(vim.cmd, 'Neotree dir=' .. vim.fn.fnameescape(ws.path))
     end, 100)
   end
 end
@@ -368,31 +455,38 @@ function M.action_grep()
   end
 end
 
----Show all workspaces picker
+---Show all workspaces picker (global registry)
 function M.show_all()
-  M.show({ title = 'All Workspaces', show_all = true })
+  M.show({ title = 'All Workspaces (Global)', show_all = true })
 end
 
 ---Show session workspaces picker
 function M.show_session()
-  M.show({ title = 'Session Workspaces', show_all = false })
+  M.show({ title = 'Session Workspaces', show_all = false, show_related = false })
+end
+
+---Show project workspaces (current + related) - DEFAULT
+function M.show_project()
+  M.show({ title = 'Project Workspaces', show_related = true })
 end
 
 ---Setup commands
 function M.setup()
   vim.api.nvim_create_user_command('WorkspacePicker', function(opts)
-    if opts.args == 'session' then
+    if opts.args == 'all' then
+      M.show_all()
+    elseif opts.args == 'session' then
       M.show_session()
     else
-      -- Default to showing ALL workspaces
-      M.show_all()
+      -- Default: show project workspaces (current + related)
+      M.show_project()
     end
   end, {
     nargs = '?',
     complete = function()
       return { 'all', 'session' }
     end,
-    desc = 'Show workspace picker (default: all, or "session" for current session only)',
+    desc = 'Show workspace picker (default: project, "all" for global, "session" for active session)',
   })
 end
 
