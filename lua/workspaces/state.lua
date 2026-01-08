@@ -236,8 +236,21 @@ end
 
 ---Set active workspace
 ---@param workspace Workspace
-function M.set_active(workspace)
+---@param opts? {change_dir?: boolean, open_explorer?: boolean}
+function M.set_active(workspace, opts)
+  opts = opts or {}
   M.active_workspace = workspace
+
+  -- Change directory to workspace root
+  local cfg = config.get()
+  local should_cd = opts.change_dir
+  if should_cd == nil then
+    should_cd = cfg.change_dir_on_switch ~= false -- default true
+  end
+
+  if should_cd then
+    vim.cmd('cd ' .. vim.fn.fnameescape(workspace.path))
+  end
 
   -- Trigger user autocmd
   vim.api.nvim_exec_autocmds('User', {

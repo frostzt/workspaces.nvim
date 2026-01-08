@@ -65,6 +65,9 @@ M.defaults = {
   -- Auto-detect project root when opening files outside known workspaces
   auto_detect_root = true,
 
+  -- Change Neovim's working directory when switching workspaces
+  change_dir_on_switch = true,
+
   -- Patterns to identify project root directories
   root_patterns = {
     '.git',

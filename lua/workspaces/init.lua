@@ -72,6 +72,12 @@ function M.setup_integrations()
       lualine.setup()
     end
   end
+
+  -- Always setup these modules (they have their own commands)
+  require('workspaces.ui.picker').setup()
+  require('workspaces.terminal').setup()
+  require('workspaces.git').setup()
+  require('workspaces.buffers').setup()
 end
 
 ---Setup autocommands
@@ -82,14 +88,20 @@ function M.setup_autocmds()
   vim.api.nvim_create_autocmd('BufEnter', {
     group = augroup,
     callback = function(args)
-      local bufname = vim.api.nvim_buf_get_name(args.buf)
-      if bufname == '' then
+      -- Guard against invalid buffers
+      if not args.buf or not vim.api.nvim_buf_is_valid(args.buf) then
+        return
+      end
+
+      local ok, bufname = pcall(vim.api.nvim_buf_get_name, args.buf)
+      if not ok or bufname == '' then
         return
       end
 
       local workspace = state.find_by_file(bufname)
       if workspace and state.active_workspace ~= workspace then
-        state.set_active(workspace)
+        -- Don't change dir on every BufEnter, just track active
+        state.set_active(workspace, { change_dir = false })
       end
     end,
   })
@@ -104,12 +116,21 @@ function M.setup_autocmds()
       end
 
       vim.defer_fn(function()
-        local bufname = vim.api.nvim_buf_get_name(args.buf)
-        if bufname ~= '' and not state.find_by_file(bufname) then
+        -- Check if buffer is still valid before accessing it
+        if not args.buf or not vim.api.nvim_buf_is_valid(args.buf) then
+          return
+        end
+
+        local ok, bufname = pcall(vim.api.nvim_buf_get_name, args.buf)
+        if not ok or bufname == '' then
+          return
+        end
+
+        if not state.find_by_file(bufname) then
           local root = utils.find_root(bufname, cfg.root_patterns)
           if root and not state.find_by_path(root) then
             -- Optionally auto-add detected roots
-            -- For now, just log
+            -- For now, just skip
           end
         end
       end, 100)

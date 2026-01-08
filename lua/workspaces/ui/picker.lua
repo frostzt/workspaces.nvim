@@ -244,7 +244,12 @@ function M.select()
     picker_state.on_select(ws)
   else
     state.open(ws.path)
-    utils.notify('Opened: ' .. ws.name)
+    utils.notify('Switched to: ' .. ws.name .. ' (' .. ws.path .. ')')
+    -- Refresh neo-tree
+    vim.defer_fn(function()
+      pcall(vim.cmd, 'Neotree close')
+      pcall(vim.cmd, 'Neotree reveal')
+    end, 100)
   end
 end
 
@@ -376,17 +381,18 @@ end
 ---Setup commands
 function M.setup()
   vim.api.nvim_create_user_command('WorkspacePicker', function(opts)
-    if opts.args == 'all' then
-      M.show_all()
-    else
+    if opts.args == 'session' then
       M.show_session()
+    else
+      -- Default to showing ALL workspaces
+      M.show_all()
     end
   end, {
     nargs = '?',
     complete = function()
       return { 'all', 'session' }
     end,
-    desc = 'Show workspace picker',
+    desc = 'Show workspace picker (default: all, or "session" for current session only)',
   })
 end
 

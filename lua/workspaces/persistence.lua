@@ -3,11 +3,34 @@ local M = {}
 
 local config = require('workspaces.config')
 
----Load workspaces from file
+-- File names
+M.CENTRAL_FILE = 'workspaces.json' -- In stdpath('data')
+M.PROJECT_FILE = '.nvim-workspace.json' -- In project root
+
+---@class ProjectWorkspaceConfig
+---@field name string? Display name for this workspace
+---@field related string[]? Paths to related workspaces
+---@field settings table? Project-specific settings
+---@field lsp table? LSP server settings
+
+---Get central registry file path
+---@return string
+function M.get_central_path()
+  local cfg = config.get()
+  return cfg.workspaces_file
+end
+
+---Get project config file path for a workspace
+---@param workspace_path string
+---@return string
+function M.get_project_config_path(workspace_path)
+  return workspace_path .. '/' .. M.PROJECT_FILE
+end
+
+---Load workspaces from central registry
 ---@return Workspace[]?
 function M.load()
-  local cfg = config.get()
-  local filepath = cfg.workspaces_file
+  local filepath = M.get_central_path()
 
   -- Check if file exists
   if vim.fn.filereadable(filepath) ~= 1 then
@@ -35,15 +58,14 @@ function M.load()
   end
 
   -- Validate and migrate data
-  return M.validate(data)
+  return M.validate_central(data)
 end
 
----Save workspaces to file
+---Save workspaces to central registry (lightweight - just paths and names)
 ---@param workspaces Workspace[]
 ---@return boolean
 function M.save(workspaces)
-  local cfg = config.get()
-  local filepath = cfg.workspaces_file
+  local filepath = M.get_central_path()
 
   -- Ensure directory exists
   local dir = vim.fn.fnamemodify(filepath, ':h')
@@ -51,10 +73,17 @@ function M.save(workspaces)
     vim.fn.mkdir(dir, 'p')
   end
 
-  -- Prepare data
+  -- Prepare data (lightweight - only essential info)
   local data = {
-    version = 1,
-    workspaces = workspaces,
+    version = 2,
+    workspaces = vim.tbl_map(function(ws)
+      return {
+        path = ws.path,
+        name = ws.name,
+        added_at = ws.added_at,
+        last_opened_at = ws.last_opened_at,
+      }
+    end, workspaces),
   }
 
   -- Encode to JSON
@@ -80,10 +109,153 @@ function M.save(workspaces)
   return true
 end
 
----Validate and potentially migrate workspace data
+---Load project-specific config from .nvim-workspace.json
+---@param workspace_path string
+---@return ProjectWorkspaceConfig?
+function M.load_project_config(workspace_path)
+  local filepath = M.get_project_config_path(workspace_path)
+
+  if vim.fn.filereadable(filepath) ~= 1 then
+    return nil
+  end
+
+  local file = io.open(filepath, 'r')
+  if not file then
+    return nil
+  end
+
+  local content = file:read('*all')
+  file:close()
+
+  if not content or content == '' then
+    return nil
+  end
+
+  local ok, data = pcall(vim.json.decode, content)
+  if not ok or type(data) ~= 'table' then
+    return nil
+  end
+
+  return data
+end
+
+---Save project-specific config to .nvim-workspace.json
+---@param workspace_path string
+---@param project_config ProjectWorkspaceConfig
+---@return boolean
+function M.save_project_config(workspace_path, project_config)
+  local filepath = M.get_project_config_path(workspace_path)
+
+  -- Prepare data
+  local data = {
+    ["$schema"] = "https://raw.githubusercontent.com/yourusername/workspaces.nvim/main/schema.json",
+    version = 1,
+    name = project_config.name,
+    related = project_config.related or {},
+    settings = project_config.settings or {},
+    lsp = project_config.lsp or {},
+  }
+
+  local ok, json = pcall(vim.json.encode, data)
+  if not ok then
+    vim.notify('Workspaces: Failed to encode project config', vim.log.levels.ERROR)
+    return false
+  end
+
+  local file = io.open(filepath, 'w')
+  if not file then
+    vim.notify('Workspaces: Failed to write project config', vim.log.levels.ERROR)
+    return false
+  end
+
+  file:write(M.pretty_json(json))
+  file:close()
+
+  return true
+end
+
+---Get related workspaces for a project
+---@param workspace_path string
+---@return string[]
+function M.get_related_workspaces(workspace_path)
+  local project_config = M.load_project_config(workspace_path)
+  if not project_config or not project_config.related then
+    return {}
+  end
+
+  -- Expand paths (handle relative paths and ~)
+  local utils = require('workspaces.utils')
+  local related = {}
+
+  for _, path in ipairs(project_config.related) do
+    -- Handle relative paths (relative to workspace)
+    local expanded
+    if path:sub(1, 1) == '.' then
+      expanded = utils.normalize_path(workspace_path .. '/' .. path)
+    else
+      expanded = utils.normalize_path(path)
+    end
+
+    if vim.fn.isdirectory(expanded) == 1 then
+      table.insert(related, expanded)
+    end
+  end
+
+  return related
+end
+
+---Add a related workspace to project config
+---@param workspace_path string
+---@param related_path string
+---@return boolean
+function M.add_related_workspace(workspace_path, related_path)
+  local project_config = M.load_project_config(workspace_path) or {}
+
+  if not project_config.related then
+    project_config.related = {}
+  end
+
+  -- Check if already exists
+  local utils = require('workspaces.utils')
+  local normalized = utils.normalize_path(related_path)
+
+  for _, existing in ipairs(project_config.related) do
+    if utils.normalize_path(existing) == normalized then
+      return true -- Already exists
+    end
+  end
+
+  table.insert(project_config.related, related_path)
+  return M.save_project_config(workspace_path, project_config)
+end
+
+---Remove a related workspace from project config
+---@param workspace_path string
+---@param related_path string
+---@return boolean
+function M.remove_related_workspace(workspace_path, related_path)
+  local project_config = M.load_project_config(workspace_path)
+  if not project_config or not project_config.related then
+    return false
+  end
+
+  local utils = require('workspaces.utils')
+  local normalized = utils.normalize_path(related_path)
+
+  for i, existing in ipairs(project_config.related) do
+    if utils.normalize_path(existing) == normalized then
+      table.remove(project_config.related, i)
+      return M.save_project_config(workspace_path, project_config)
+    end
+  end
+
+  return false
+end
+
+---Validate central registry data
 ---@param data table
 ---@return Workspace[]
-function M.validate(data)
+function M.validate_central(data)
   local workspaces = {}
 
   -- Handle versioned format
@@ -101,11 +273,20 @@ function M.validate(data)
         path = ws.path,
         added_at = ws.added_at or os.time(),
         last_opened_at = ws.last_opened_at,
-        settings = ws.settings or {},
+        settings = {}, -- Settings now come from project config
       }
 
       -- Only add if path still exists
       if vim.fn.isdirectory(workspace.path) == 1 then
+        -- Load project-specific settings if available
+        local project_config = M.load_project_config(workspace.path)
+        if project_config then
+          workspace.settings = project_config.settings or {}
+          if project_config.name then
+            workspace.name = project_config.name
+          end
+        end
+
         table.insert(workspaces, workspace)
       end
     end
@@ -118,7 +299,6 @@ end
 ---@param json string
 ---@return string
 function M.pretty_json(json)
-  -- Simple pretty printer for JSON
   local result = {}
   local indent = 0
   local in_string = false
@@ -158,64 +338,49 @@ function M.pretty_json(json)
   return table.concat(result)
 end
 
----Export workspaces to a specific file (for sharing)
----@param filepath string
----@param workspaces? Workspace[]
+---Initialize project config file in a workspace
+---@param workspace_path string
+---@param name? string
 ---@return boolean
-function M.export(filepath, workspaces)
-  local state = require('workspaces.state')
-  workspaces = workspaces or state.workspaces
+function M.init_project_config(workspace_path, name)
+  local existing = M.load_project_config(workspace_path)
+  if existing then
+    return true -- Already exists
+  end
 
-  local data = {
-    version = 1,
-    exported_at = os.time(),
-    workspaces = vim.tbl_map(function(ws)
-      return {
-        name = ws.name,
-        path = ws.path,
-        settings = ws.settings,
-      }
-    end, workspaces),
+  local project_config = {
+    name = name or vim.fn.fnamemodify(workspace_path, ':t'),
+    related = {},
+    settings = {},
+    lsp = {},
   }
 
-  local ok, json = pcall(vim.json.encode, data)
-  if not ok then
-    return false
-  end
-
-  local file = io.open(filepath, 'w')
-  if not file then
-    return false
-  end
-
-  file:write(M.pretty_json(json))
-  file:close()
-
-  return true
+  return M.save_project_config(workspace_path, project_config)
 end
 
----Import workspaces from a file
----@param filepath string
----@return Workspace[]?, string?
-function M.import(filepath)
-  if vim.fn.filereadable(filepath) ~= 1 then
-    return nil, 'File not found: ' .. filepath
-  end
+---Check if a project has a workspace config file
+---@param workspace_path string
+---@return boolean
+function M.has_project_config(workspace_path)
+  local filepath = M.get_project_config_path(workspace_path)
+  return vim.fn.filereadable(filepath) == 1
+end
 
-  local file = io.open(filepath, 'r')
-  if not file then
-    return nil, 'Cannot read file: ' .. filepath
-  end
+---Export for sharing (creates a .nvim-workspace.json with related projects)
+---@param workspace_path string
+---@param related_paths string[]
+---@return boolean
+function M.export_workspace(workspace_path, related_paths)
+  local project_config = M.load_project_config(workspace_path) or {}
+  project_config.related = related_paths
+  return M.save_project_config(workspace_path, project_config)
+end
 
-  local content = file:read('*all')
-  file:close()
-
-  local ok, data = pcall(vim.json.decode, content)
-  if not ok then
-    return nil, 'Invalid JSON in file'
-  end
-
-  return M.validate(data), nil
+---Import workspaces from a project's .nvim-workspace.json
+---@param workspace_path string
+---@return string[]? related paths
+function M.import_related(workspace_path)
+  return M.get_related_workspaces(workspace_path)
 end
 
 return M

@@ -67,6 +67,37 @@ function M.setup()
   end, {
     desc = 'Select workspace with picker',
   })
+
+  -- Related workspaces (project-specific)
+  vim.api.nvim_create_user_command('WorkspaceRelated', function(opts)
+    M.cmd_related(opts.fargs[1], opts.fargs[2])
+  end, {
+    nargs = '*',
+    complete = function(arg_lead, cmd_line)
+      local parts = vim.split(cmd_line, '%s+')
+      if #parts == 2 then
+        return { 'add', 'remove', 'list', 'open' }
+      end
+      return {}
+    end,
+    desc = 'Manage related workspaces for current project',
+  })
+
+  -- Initialize project config
+  vim.api.nvim_create_user_command('WorkspaceInit', function(opts)
+    M.cmd_init(opts.fargs[1])
+  end, {
+    nargs = '?',
+    complete = 'dir',
+    desc = 'Initialize .nvim-workspace.json in project',
+  })
+
+  -- Edit project config
+  vim.api.nvim_create_user_command('WorkspaceEdit', function()
+    M.cmd_edit()
+  end, {
+    desc = 'Edit .nvim-workspace.json for current workspace',
+  })
 end
 
 ---Handle main Workspace command
@@ -85,6 +116,15 @@ function M.handle_command(args)
     end,
     remove = function()
       M.cmd_remove(args[2])
+    end,
+    related = function()
+      M.cmd_related(args[2], args[3])
+    end,
+    init = function()
+      M.cmd_init(args[2])
+    end,
+    edit = function()
+      M.cmd_edit()
     end,
     open = function()
       M.cmd_open(args[2])
@@ -252,7 +292,13 @@ end
 function M.cmd_select()
   M.pick_workspace('Select workspace', function(workspace)
     state.open(workspace.path)
-    utils.notify('Switched to: ' .. workspace.name)
+    utils.notify('Switched to: ' .. workspace.name .. ' (' .. workspace.path .. ')')
+    -- Refresh neo-tree to show new directory
+    vim.defer_fn(function()
+      -- Close and reopen neo-tree to refresh with new cwd
+      pcall(vim.cmd, 'Neotree close')
+      pcall(vim.cmd, 'Neotree reveal')
+    end, 100)
   end)
 end
 
@@ -295,7 +341,12 @@ function M.cmd_switch(identifier)
   if not identifier then
     M.pick_session_workspace('Switch to workspace', function(workspace)
       state.set_active(workspace)
-      utils.notify('Active: ' .. workspace.name)
+      utils.notify('Switched to: ' .. workspace.name .. ' (' .. workspace.path .. ')')
+      -- Refresh neo-tree
+      vim.defer_fn(function()
+        pcall(vim.cmd, 'Neotree close')
+        pcall(vim.cmd, 'Neotree reveal')
+      end, 100)
     end)
     return
   end
@@ -304,7 +355,12 @@ function M.cmd_switch(identifier)
   if workspace then
     -- Ensure it's in session
     state.open(workspace.path)
-    utils.notify('Active: ' .. workspace.name)
+    utils.notify('Switched to: ' .. workspace.name .. ' (' .. workspace.path .. ')')
+    -- Refresh neo-tree
+    vim.defer_fn(function()
+      pcall(vim.cmd, 'Neotree close')
+      pcall(vim.cmd, 'Neotree reveal')
+    end, 100)
   else
     utils.notify('Workspace not found', vim.log.levels.ERROR)
   end
@@ -432,6 +488,9 @@ function M.complete(arg_lead, cmd_line, cursor_pos)
       'files',
       'grep',
       'terminal',
+      'related',
+      'init',
+      'edit',
     }
     return vim.tbl_filter(function(cmd)
       return vim.startswith(cmd, arg_lead)
@@ -447,9 +506,168 @@ function M.complete(arg_lead, cmd_line, cursor_pos)
     return M.complete_workspace_paths()
   elseif subcommand == 'close' or subcommand == 'switch' then
     return M.complete_session_paths()
+  elseif subcommand == 'related' then
+    return { 'add', 'remove', 'list', 'open' }
   end
 
   return {}
+end
+
+---Manage related workspaces
+---@param action? string
+---@param path? string
+function M.cmd_related(action, path)
+  local persistence = require('workspaces.persistence')
+  local active = state.get_active()
+
+  if not active then
+    utils.notify('No active workspace. Open a workspace first.', vim.log.levels.ERROR)
+    return
+  end
+
+  if not action or action == 'list' then
+    -- List related workspaces
+    local related = persistence.get_related_workspaces(active.path)
+    if #related == 0 then
+      utils.notify('No related workspaces for ' .. active.name)
+      utils.notify('Add with :WorkspaceRelated add <path>')
+      return
+    end
+
+    local lines = { 'Related workspaces for ' .. active.name .. ':' }
+    for _, rel_path in ipairs(related) do
+      local ws = state.find_by_path(rel_path)
+      local name = ws and ws.name or vim.fn.fnamemodify(rel_path, ':t')
+      table.insert(lines, '  ' .. utils.icon('workspace') .. ' ' .. name .. '  ' .. utils.truncate_path(rel_path, 40))
+    end
+    print(table.concat(lines, '\n'))
+
+  elseif action == 'add' then
+    if not path then
+      -- Pick directory
+      vim.ui.input({ prompt = 'Related workspace path: ', completion = 'dir' }, function(input)
+        if input and input ~= '' then
+          M.cmd_related('add', input)
+        end
+      end)
+      return
+    end
+
+    local normalized = utils.normalize_path(path)
+    if vim.fn.isdirectory(normalized) ~= 1 then
+      utils.notify('Directory not found: ' .. path, vim.log.levels.ERROR)
+      return
+    end
+
+    if persistence.add_related_workspace(active.path, normalized) then
+      utils.notify('Added related workspace: ' .. vim.fn.fnamemodify(normalized, ':t'))
+      -- Also add to central registry if not exists
+      if not state.find_by_path(normalized) then
+        state.add(normalized)
+      end
+    else
+      utils.notify('Failed to add related workspace', vim.log.levels.ERROR)
+    end
+
+  elseif action == 'remove' then
+    local related = persistence.get_related_workspaces(active.path)
+    if #related == 0 then
+      utils.notify('No related workspaces to remove')
+      return
+    end
+
+    if not path then
+      -- Pick from related
+      vim.ui.select(related, {
+        prompt = 'Remove related workspace',
+        format_item = function(p)
+          return vim.fn.fnamemodify(p, ':t') .. '  ' .. utils.truncate_path(p, 40)
+        end,
+      }, function(choice)
+        if choice then
+          M.cmd_related('remove', choice)
+        end
+      end)
+      return
+    end
+
+    if persistence.remove_related_workspace(active.path, path) then
+      utils.notify('Removed related workspace')
+    else
+      utils.notify('Failed to remove related workspace', vim.log.levels.ERROR)
+    end
+
+  elseif action == 'open' then
+    -- Open all related workspaces
+    local related = persistence.get_related_workspaces(active.path)
+    if #related == 0 then
+      utils.notify('No related workspaces to open')
+      return
+    end
+
+    local opened = 0
+    for _, rel_path in ipairs(related) do
+      local ws, _ = state.open(rel_path)
+      if ws then
+        opened = opened + 1
+      end
+    end
+    utils.notify('Opened ' .. opened .. ' related workspace(s)')
+  end
+end
+
+---Initialize project workspace config
+---@param path? string
+function M.cmd_init(path)
+  local persistence = require('workspaces.persistence')
+
+  path = path or vim.fn.getcwd()
+  local normalized = utils.normalize_path(path)
+
+  if vim.fn.isdirectory(normalized) ~= 1 then
+    utils.notify('Directory not found: ' .. path, vim.log.levels.ERROR)
+    return
+  end
+
+  if persistence.has_project_config(normalized) then
+    utils.notify('.nvim-workspace.json already exists')
+    M.cmd_edit()
+    return
+  end
+
+  local name = vim.fn.fnamemodify(normalized, ':t')
+  vim.ui.input({ prompt = 'Workspace name: ', default = name }, function(input)
+    if input then
+      if persistence.init_project_config(normalized, input) then
+        utils.notify('Created .nvim-workspace.json in ' .. normalized)
+        -- Also add to registry
+        state.add(normalized, input)
+        M.cmd_edit()
+      else
+        utils.notify('Failed to create project config', vim.log.levels.ERROR)
+      end
+    end
+  end)
+end
+
+---Edit project workspace config
+function M.cmd_edit()
+  local persistence = require('workspaces.persistence')
+  local active = state.get_active()
+
+  local path
+  if active then
+    path = persistence.get_project_config_path(active.path)
+  else
+    path = persistence.get_project_config_path(vim.fn.getcwd())
+  end
+
+  if vim.fn.filereadable(path) ~= 1 then
+    utils.notify('No .nvim-workspace.json found. Run :WorkspaceInit first.')
+    return
+  end
+
+  vim.cmd('edit ' .. vim.fn.fnameescape(path))
 end
 
 return M
