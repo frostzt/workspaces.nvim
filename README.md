@@ -2,7 +2,9 @@
 
 Multi-root workspace management for Neovim, inspired by VSCode's workspace feature.
 
-Open and manage multiple project directories in a single Neovim session with full LSP support, file navigation, and seamless integration with your favorite plugins.
+Open and manage multiple project directories in a single Neovim session
+with full LSP support, file navigation, and seamless integration with
+your favorite plugins.
 
 ## Features
 
