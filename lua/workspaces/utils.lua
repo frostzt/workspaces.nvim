@@ -4,6 +4,10 @@ local M = {}
 ---@param path string
 ---@return string
 function M.normalize_path(path)
+  -- Skip special buffer names (e.g., [dap-repl], term://, etc.)
+  if not path or path == '' or path:match('^%[') or path:match('^%w+://') then
+    return path or ''
+  end
   -- Expand ~ and environment variables
   local expanded = vim.fn.expand(path)
   -- Get absolute path
